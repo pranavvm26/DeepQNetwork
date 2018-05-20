@@ -25,7 +25,7 @@ tf.app.flags.DEFINE_string('checkpoint', os.path.join(FLAGS.logdir, FLAGS.experi
 tf.app.flags.DEFINE_integer('network_update_n', 32, 'Update network every n steps')
 tf.app.flags.DEFINE_integer('target_network_update_frequency', 10000, 'Update target network every n steps')
 tf.app.flags.DEFINE_bool('show_training', True, 'Display training')
-tf.app.flags.DEFINE_integer('threads', 1, 'Number of threads to run asynch training, select 1 for DEBUG')
+tf.app.flags.DEFINE_integer('threads', 4, 'Number of threads to run asynch training, select 1 for DEBUG')
 
 
 T = 0
