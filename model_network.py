@@ -28,6 +28,7 @@ def deep_Q_network(input_state, nactions, name_scope):
                 net = slim.fully_connected(inputs=net,
                                            num_outputs=nactions,
                                            activation_fn=None,
-                                           scope='Qvalue')
-                net = slim.softmax(net)
+                                           scope='fullyconn2')
+                net = slim.softmax(net,
+                                   scope='final_Q_value')
     return net
