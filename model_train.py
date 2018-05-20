@@ -1,19 +1,14 @@
+import os
 import gym
 import random
-import matplotlib.pyplot as plt
-import atari_game as game
 import numpy as np
-import pandas as pd
-import threading as t
-import time
-import os
 import tensorflow as tf
+import threading as thread
+import model_atari_game as game
+from model_network import deep_Q_network
 
 
 FLAGS = tf.app.flags.FLAGS
-
-
-slim = tf.contrib.slim
 
 
 tf.app.flags.DEFINE_string('experiment', 'dqn_breakout', 'Name of the current experiment')
@@ -30,11 +25,14 @@ tf.app.flags.DEFINE_string('checkpoint', os.path.join(FLAGS.logdir, FLAGS.experi
 tf.app.flags.DEFINE_integer('network_update_n', 32, 'Update network every n steps')
 tf.app.flags.DEFINE_integer('target_network_update_frequency', 10000, 'Update target network every n steps')
 tf.app.flags.DEFINE_bool('show_training', True, 'Display training')
+tf.app.flags.DEFINE_integer('threads', 1, 'Number of threads to run asynch training, select 1 for DEBUG')
+
 
 T = 0
 TMAX = 1000000
 
-THREADS = 1
+
+THREADS = FLAGS.threads
 
 
 def sample_final_epsilon():
@@ -44,50 +42,122 @@ def sample_final_epsilon():
     """
     final_epsilons = np.array([.1,.01,.5])
     probabilities = np.array([0.4,0.3,0.3])
-    return np.random.choice(final_epsilons, 1, p=list(probabilities))[0]
+    final_eps = np.random.choice(final_epsilons, 1, p=list(probabilities))[0]
+    return 0.9
 
 
-def deep_Q_network(input_state, nactions, name_scope):
-    with tf.device("/cpu:0"):
-        with tf.variable_scope(name_scope, 'dqn', [input_state]) as sc:
-            end_points_collection = sc.original_name_scope + '_end_points'
-            # Collect outputs for conv2d, fully_connected and max_pool2d.
-            with slim.arg_scope([slim.conv2d, slim.flatten, slim.fully_connected],
-                                outputs_collections=end_points_collection):
+def train_mythreads(training_arguments, thread_id):
 
-                net = slim.conv2d(inputs=input_state,
-                                  num_outputs=16,
-                                  kernel_size=[8, 8],
-                                  stride=4,
-                                  scope='conv1')
-                print(net.get_shape())
-                net = slim.conv2d(inputs=net,
-                                  num_outputs=32,
-                                  kernel_size=[4, 4],
-                                  stride=2,
-                                  scope='conv2')
-                print(net.get_shape())
-                net = slim.flatten(inputs=net,
-                                   scope='flatten1')
-                print(net.get_shape())
-                net = slim.fully_connected(inputs=net,
-                                           num_outputs=256,
-                                           scope='fullyconn1')
-                print(net.get_shape())
-                net = slim.fully_connected(inputs=net,
-                                           num_outputs=nactions,
-                                           activation_fn=None,
-                                           scope='Qvalue')
-                print(net.get_shape())
-    return net
+    # arguments
+    sess, runtime_log, reset_target_network_params, \
+    game_env, qValue, deepqn, n_actions, target_qValue, \
+    target_deepqn, grads, y_target, action_, saver, \
+    summary_op, update_ops, summary_placeholders, T, writer = training_arguments
+
+    # epsilon parameters
+    final_epsilon = sample_final_epsilon()
+    initial_epsilon = 1.0
+    epsilon = 1.0
+
+    # Initialize network gradients
+    state_batch = []
+    action_batch = []
+    reward_batch = []
+
+    while T < TMAX:
+
+        state_t = game_env.get_initial_frames()
+        terminate = False
+
+        per_episode_reward = 0
+        per_episode_average_maxq = 0
+        per_episode_t = 0
+
+        while True:
+            # use network to obtain q value
+            q_value = sess.run([qValue], feed_dict={deepqn: [state_t]})
+            # action parameter
+            action_t = np.zeros([n_actions])
+
+            e = final_epsilon
+
+            # choose action based on e-greedy policy
+            action_index = 0
+            if random.random() <= epsilon:
+                action_index = random.randrange(n_actions)
+            else:
+                action_index = np.argmax(q_value)
+            action_t[action_index] = 1
+
+            # Scale down epsilon
+            if epsilon > final_epsilon:
+                epsilon -= (initial_epsilon - final_epsilon) / 1000000
+
+            state_t_target, reward_t, terminate, _ = game_env.step_in_game(action_index)
+
+            target_q_value = sess.run([target_qValue], feed_dict={target_deepqn: [state_t_target]})
+
+            clipped_reward_t = np.clip(reward_t, -1, 1)
+
+            if terminate:
+                reward_batch.append(clipped_reward_t)
+            else:
+                reward_batch.append(clipped_reward_t + FLAGS.gamma * np.max(target_q_value))
+            action_batch.append(action_t)
+            state_batch.append(state_t)
+            state_t = state_t_target
+            T += 1
+
+            per_episode_t += 1
+            per_episode_reward += reward_t
+            per_episode_average_maxq += np.max(q_value)
+
+            if T % FLAGS.network_update_n == 0 or terminate:
+                sess.run(grads, feed_dict={y_target: reward_batch,
+                                           action_: action_batch,
+                                           deepqn: [state_t]})
+                # Initialize network gradients
+                state_batch = []
+                action_batch = []
+                reward_batch = []
+
+            # Optionally update target network
+            if T % FLAGS.target_network_update_frequency == 0:
+                sess.run(reset_target_network_params)
+
+            # Save model progress
+            if T % 1000 == 0:
+                saver.save(sess, FLAGS.checkpoint + "/" + FLAGS.experiment + ".ckpt", global_step=T)
+
+            if T % 100 == 0:
+                summary_str = sess.run(summary_op)
+                writer.add_summary(summary_str, float(T))
+
+            # Print end of episode stats
+            if terminate:
+                stats = [per_episode_reward, per_episode_average_maxq / float(per_episode_t), epsilon]
+                for i in range(len(stats)):
+                    sess.run(update_ops[i], feed_dict={summary_placeholders[i]: float(stats[i])})
+                print("THREAD ID:",thread_id, "TIME:", T, "/EPSILON", epsilon, "/RWD:", per_episode_reward, "/Q_MAX:%.4f" % (
+                    per_episode_average_maxq / float(per_episode_t)), "/E PRGS:", T / 1000000)
+                break
 
 
-def train(g_env):
+def train():
+
+    # compile game environments
+    g_env = [gym.make(FLAGS.game) for i in range(THREADS)]
+
+    # declare counter as global
     global T
+
+    # pin the complete process to the CPU
     with tf.Graph().as_default(), tf.device('/cpu:0'):
 
         # game environment
-        game_env = game.Atari(g_env, FLAGS.height, FLAGS.width, FLAGS.collateframes, FLAGS.game)
+        game_envs = []
+        for tid in range(THREADS):
+            game_envs.append(game.Atari(g_env[tid], FLAGS.height, FLAGS.width, FLAGS.collateframes, FLAGS.game))
 
         # build network
         with tf.name_scope('input'):
@@ -98,7 +168,7 @@ def train(g_env):
                                            [None, FLAGS.width, FLAGS.height, FLAGS.collateframes],
                                            name="target-deepq-state")
         # calculate the number of actions
-        n_actions = game_env.n_actions
+        n_actions = game_envs[0].n_actions
 
         # trainable network
         qValue = deep_Q_network(deepqn, n_actions, "deep-q-network")
@@ -151,123 +221,45 @@ def train(g_env):
         # collect all summaries
         summary_op = tf.summary.merge_all()
 
-        # epsilon parameters
-        final_epsilon = sample_final_epsilon()
-        initial_epsilon = 1.0
-        epsilon = 1.0
-
-
-
         # instantiate a tensorflow session
-        with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_placement=False)) as sess:
-            writer = tf.summary.FileWriter(runtime_log, sess.graph)
-            # Initialize variables
-            sess.run(tf.global_variables_initializer())
-            # Initialize target network weights
-            sess.run(reset_target_network_params)
+        sess = tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_placement=False))
+        # tensorflow log writer
+        writer = tf.summary.FileWriter(runtime_log, sess.graph)
+        # Initialize variables
+        sess.run(tf.global_variables_initializer())
+        # Initialize target network weights
+        sess.run(reset_target_network_params)
 
-            # Initialize network gradients
-            state_batch = []
-            action_batch = []
-            reward_batch = []
+        # compile all training parameters
+        training_arguments = []
+        for game_env in game_envs:
+            training_arguments.append([sess, runtime_log, reset_target_network_params,
+                                       game_env, qValue, deepqn, n_actions, target_qValue,
+                                       target_deepqn, grads, y_target, action_, saver,
+                                       summary_op, update_ops, summary_placeholders, T, writer])
 
-            while T < TMAX:
+        # train threads
+        train_threads = [thread.Thread(target=train_mythreads, args=(training_arguments[tid], tid, )) for tid in range(THREADS)]
+        # start threads
+        for t_ in train_threads:
+            print("Begin Training with thread:", t_)
+            t_.start()
 
-                state_t = game_env.get_initial_frames()
-                terminate = False
+        # show emulator console during training
+        while True:
+            if FLAGS.show_training:
+                for env in g_env:
+                    env.render()
 
-                per_episode_reward = 0
-                per_episode_average_maxq = 0
-                per_episode_t = 0
-
-                while True:
-                    # use network to obtain q value
-                    q_value = sess.run([qValue],feed_dict={deepqn: [state_t]})
-                    # action parameter
-                    action_t = np.zeros([n_actions])
-
-                    # choose action based on e-greedy policy
-                    action_index = 0
-                    if random.random() <= epsilon:
-                        action_index = random.randrange(n_actions)
-                    else:
-                        action_index = np.argmax(q_value)
-                    action_t[action_index] = 1
-
-                    # Scale down epsilon
-                    if epsilon > final_epsilon:
-                        epsilon -= (initial_epsilon - final_epsilon) / 1000000
-
-                    state_t_target, reward_t, terminate, _ = game_env.step_in_game(action_index)
-
-                    target_q_value = sess.run([target_qValue], feed_dict={target_deepqn: [state_t_target]})
-
-                    clipped_reward_t = np.clip(reward_t, -1, 1)
-
-                    if terminate:
-                        reward_batch.append(clipped_reward_t)
-                    else:
-                        reward_batch.append(clipped_reward_t + FLAGS.gamma * np.max(target_q_value))
-                    action_batch.append(action_t)
-                    state_batch.append(state_t)
-                    state_t = state_t_target
-                    T += 1
-
-                    per_episode_t += 1
-                    per_episode_reward += reward_t
-                    per_episode_average_maxq += np.max(q_value)
-
-                    if T % FLAGS.network_update_n == 0 or terminate:
-                        sess.run(grads, feed_dict={y_target: reward_batch,
-                                                   action_: action_batch,
-                                                   deepqn: [state_t]})
-                        # Initialize network gradients
-                        state_batch = []
-                        action_batch = []
-                        reward_batch = []
-
-                    # Optionally update target network
-                    if T % FLAGS.target_network_update_frequency == 0:
-                        sess.run(reset_target_network_params)
-
-                    # Save model progress
-                    if T % 1000 == 0:
-                        saver.save(sess, FLAGS.checkpoint + "/" + FLAGS.experiment + ".ckpt", global_step=T)
-
-                    if T % 100 == 0:
-                        summary_str = sess.run(summary_op)
-                        writer.add_summary(summary_str, float(T))
-                    # Print end of episode stats
-                    if terminate:
-                        stats = [per_episode_reward, per_episode_average_maxq / float(per_episode_t), epsilon]
-                        for i in range(len(stats)):
-                            sess.run(update_ops[i], feed_dict={summary_placeholders[i]: float(stats[i])})
-                        print("TIME/TIMESTEP", T, "/ EPSILON", epsilon, "/ REWARD", per_episode_reward, "/ Q_MAX %.4f" % (
-                            per_episode_average_maxq / float(per_episode_t)), "/ EPSILON PROGRESS", T / 1000000)
-                        break
-                    
-
-
+        # Join threads to end training
+        for t_ in train_thread:
+            t_.join()
 
 
 
 if __name__ == "__main__":
-    envs = [gym.make(FLAGS.game) for i in range(THREADS)]
-    train_thread = [t.Thread(target=train, args=(envs[0],)) for thread_id in range(THREADS)]
-    for t in train_thread:
-        print("Begin Training")
-        t.start()
-
-    # envs = [gym.make(FLAGS.game) for i in range(THREADS)]
-
-    while True:
-        if FLAGS.show_training:
-            for env in envs:
-                env.render()
-
-    for t in train_thread:
-        t.join()
-
+    # begin training
+    train()
 
 
 
