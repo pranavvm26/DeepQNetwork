@@ -79,8 +79,6 @@ def train_mythreads(training_arguments, thread_id):
             # action parameter
             action_t = np.zeros([n_actions])
 
-            e = final_epsilon
-
             # choose action based on e-greedy policy
             action_index = 0
             if random.random() <= epsilon:
