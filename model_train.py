@@ -12,7 +12,7 @@ FLAGS = tf.app.flags.FLAGS
 
 
 tf.app.flags.DEFINE_string('experiment', 'dqn_breakout', 'Name of the current experiment')
-tf.app.flags.DEFINE_string('game', 'Breakout-v0', 'Name of the atari game to play. '
+tf.app.flags.DEFINE_string('game', 'Breakout-v0', 'Name of RoadRunner-ram-v0the atari game to play. '
                                                   'Full list here: https://gym.openai.com/envs#atari')
 tf.app.flags.DEFINE_integer('height', 84, 'Height of the input frame')
 tf.app.flags.DEFINE_integer('width', 84, 'Width of the input frame')
@@ -25,7 +25,7 @@ tf.app.flags.DEFINE_string('checkpoint', os.path.join(FLAGS.logdir, FLAGS.experi
 tf.app.flags.DEFINE_integer('network_update_n', 32, 'Update network every n steps')
 tf.app.flags.DEFINE_integer('target_network_update_frequency', 10000, 'Update target network every n steps')
 tf.app.flags.DEFINE_bool('show_training', True, 'Display training')
-tf.app.flags.DEFINE_integer('threads', 4, 'Number of threads to run asynch training, select 1 for DEBUG')
+tf.app.flags.DEFINE_integer('threads', 1, 'Number of threads to run asynch training, select 1 for DEBUG')
 
 
 T = 0
@@ -43,16 +43,15 @@ def sample_final_epsilon():
     final_epsilons = np.array([.1,.01,.5])
     probabilities = np.array([0.4,0.3,0.3])
     final_eps = np.random.choice(final_epsilons, 1, p=list(probabilities))[0]
-    return 0.9
+    return final_eps
 
 
-def train_mythreads(training_arguments, thread_id):
+def train_mythreads(training_arguments, thread_id, sess, summary_op, saver, update_ops, summary_placeholders):
 
     # arguments
-    sess, runtime_log, reset_target_network_params, \
-    game_env, qValue, deepqn, n_actions, target_qValue, \
-    target_deepqn, grads, y_target, action_, saver, \
-    summary_op, update_ops, summary_placeholders, T, writer = training_arguments
+    runtime_log, reset_target_network_params, \
+    game_env, qValue, deepqn, n_actions, target_qValue,\
+    target_deepqn, grads, y_target, action_, T, writer = training_arguments
 
     # epsilon parameters
     final_epsilon = sample_final_epsilon()
@@ -89,7 +88,7 @@ def train_mythreads(training_arguments, thread_id):
 
             # Scale down epsilon
             if epsilon > final_epsilon:
-                epsilon -= (initial_epsilon - final_epsilon) / 1000000
+                epsilon -= (initial_epsilon - final_epsilon) / 100000
 
             state_t_target, reward_t, terminate, _ = game_env.step_in_game(action_index)
 
@@ -101,10 +100,21 @@ def train_mythreads(training_arguments, thread_id):
                 reward_batch.append(clipped_reward_t)
             else:
                 reward_batch.append(clipped_reward_t + FLAGS.gamma * np.max(target_q_value))
+
             action_batch.append(action_t)
             state_batch.append(state_t)
             state_t = state_t_target
             T += 1
+
+            # import matplotlib.pyplot as plt
+            # fig, axs = plt.subplots(2, 2, sharex=True, sharey=True)
+            # imx = 0
+            # for x in range(axs.shape[0]):
+            #     for y in range(axs.shape[1]):
+            #         img = np.asarray(state_t[:,:,imx] * 255).astype(np.uint8)
+            #         axs[x, y].imshow(img)
+            #         imx += 1
+            # plt.show()
 
             per_episode_t += 1
             per_episode_reward += reward_t
@@ -231,13 +241,12 @@ def train():
         # compile all training parameters
         training_arguments = []
         for game_env in game_envs:
-            training_arguments.append([sess, runtime_log, reset_target_network_params,
+            training_arguments.append([runtime_log, reset_target_network_params,
                                        game_env, qValue, deepqn, n_actions, target_qValue,
-                                       target_deepqn, grads, y_target, action_, saver,
-                                       summary_op, update_ops, summary_placeholders, T, writer])
+                                       target_deepqn, grads, y_target, action_, T, writer])
 
         # train threads
-        train_threads = [thread.Thread(target=train_mythreads, args=(training_arguments[tid], tid, )) for tid in range(THREADS)]
+        train_threads = [thread.Thread(target=train_mythreads, args=(training_arguments[tid], tid, sess, summary_op, saver, update_ops, summary_placeholders, )) for tid in range(THREADS)]
         # start threads
         for t_ in train_threads:
             print("Begin Training with thread:", t_)
@@ -252,6 +261,9 @@ def train():
         # Join threads to end training
         for t_ in train_thread:
             t_.join()
+
+        # checkpoint debug
+        train_mythreads(training_arguments[0], 0, sess, summary_op, saver, update_ops, summary_placeholders)
 
 
 
